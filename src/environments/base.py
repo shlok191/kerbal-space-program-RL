@@ -22,7 +22,8 @@ class KSPEnvironment():
             connection_name: str,
             vessel_name: str,
             max_steps: int,
-            rcs_enabled: bool):
+            rcs_enabled: bool,
+            step_sim_time: int = 10):
         """Creates a connection with kRPC to remote server along given ports!
 
         Args:
@@ -33,8 +34,9 @@ class KSPEnvironment():
             vessel_name (str): The name of the vessel to control -- Also assists with debugging!
             max_steps (int): The maximum number of steps to run the simulation for
             rcs_enabled (bool): Whether or not the reaction control system is enabled
+            step_sim_time (int): The time to step the simulation by
         """
-        
+
         # Storing object variables
         self.ip_address = ip_address
         self.rpc_port = rpc_port
@@ -42,6 +44,10 @@ class KSPEnvironment():
         self.connection_name = connection_name
         self.vessel_name = vessel_name
         self.rcs_enabled = rcs_enabled
+        
+        # Defining time tracking variables
+        self.elapsed_time = 0
+        self.step_sim_time = step_sim_time
         
         # Attempting to create a connection with the server
         try:
@@ -62,71 +68,64 @@ class KSPEnvironment():
         except:
             raise ConnectionError("Could not establish a connection!")
                 
-        # Defining initial control settings
-        
-        self.controls = {
-            "throttle": 0, # Let Throttle range from [0, 1]
-            "pitch": 0,    # Let Pitch range from [0, 1]
-            "yaw": 0,      # Let Yaw range from [0, 1] 
-            "roll": 0      # Let Roll range from [0, 1]
-        }
-        
         # Getting the starting time in KSP time
         self.start_time = self.connection.space_center.ut
         
         # Defining the maximum number of steps!
         self.max_steps = max_steps    
-
-        # Starting with a clean state :)        
-        self.restart_episode()
-
+        
+        ref_frame = self.vessel.orbit.body.reference_frame
+        
+        # Defining the flight and vessel stream that collects info through a TCP/IP connection
+        self.flight_stream = self.connection.add_stream(self.vessel.flight, ref_frame)
+        self.vessel_stream = self.connection.add_stream(getattr, self.connection.space_center, 'active_vessel')
+        
     def get_vessel_updates(self) -> Dict[str, float]:
         """Returns important telemetery information regarding the vessel
         
         Returns:
-            Dict[str, float]: Contains atributes and their values (Altitude, Velocity, Acceleration etc.)
+            Dict[str, float]: Contains atributes and their values (Altitude, Velocity, etc.)
         """
         
-       # Defining the dictionary to return with critical vessel state parameters
+        # Collecting flight info
+        flight = self.flight_stream()
+        vessel = self.vessel_stream()
+        
+        # Defining the dictionary to return with critical vessel state parameters
         vessel_state = {
             
             # Flight Telemetry
-            "altitude": self.vessel.flight().mean_altitude,  # Altitude above sea level [meters]
-            "surface_altitude": self.vessel.flight().surface_altitude,  # Altitude above terrain [meters]
-            "velocity": self.vessel.flight().velocity,  # Velocity vector [m/s]
-            "acceleration": self.vessel.flight().acceleration,  # Acceleration vector [m/s²]
+            "altitude": flight.mean_altitude,   # Altitude above sea level [meters]
+            "velocity": flight.velocity,        # Velocity vector [m/s]
             
             # Orientation
-            "pitch": self.vessel.flight().pitch,  # Pitch angle [degrees]
-            "yaw": self.vessel.flight().yaw,  # Yaw angle [degrees]
-            "roll": self.vessel.flight().roll,  # Roll angle [degrees]
+            "pitch": flight.pitch,         # Pitch angle [degrees] 
+            "yaw": flight.sideslip_angle,  # Yaw angle [degrees]
+            "roll": flight.roll,           # Roll angle [degrees]
             
             # Thrust and Engine Metrics
-            "thrust": self.vessel.thrust(),  # Current thrust output [Newtons]
-            "avail_thrust": self.vessel.available_thrust(),  # Available thrust [Newtons]
-            "max_thrust": self.vessel.max_thrust(),  # Maximum thrust at current conditions [Newtons]
-            "vacuum_specific_impulse": self.vessel.vacuum_specific_impulse(),  # ISP in vacuum [seconds]
-            "specific_impulse": self.vessel.specific_impulse(),  # Current ISP [seconds]
-            
+            "thrust": vessel.thrust,                  # Current thrust output [Newtons]
+            "avail_thrust": vessel.available_thrust,  # Available thrust [Newtons]
+
             # Orbital Parameters
-            "apoapsis": self.vessel.orbit.apoapsis_altitude,  # Highest point in orbit [meters]
-            "periapsis": self.vessel.orbit.periapsis_altitude,  # Lowest point in orbit [meters]
-            "time_to_apoapsis": self.vessel.orbit.time_to_apoapsis,  # Time until apoapsis [seconds]
-            "time_to_periapsis": self.vessel.orbit.time_to_periapsis,  # Time until periapsis [seconds]
-            "eccentricity": self.vessel.orbit.eccentricity,  # Orbital eccentricity (unitless)
-            "inclination": self.vessel.orbit.inclination,  # Orbital inclination [degrees]
+            "apoapsis": vessel.orbit.apoapsis_altitude,             # Highest point in orbit [meters]
+            "periapsis": vessel.orbit.periapsis_altitude,           # Lowest point in orbit [meters]
+            "time_to_apoapsis": vessel.orbit.time_to_apoapsis,      # Time until apoapsis [seconds]
+            "time_to_periapsis": vessel.orbit.time_to_periapsis,    # Time until periapsis [seconds]
+            "eccentricity":vessel.orbit.eccentricity,               # Orbital eccentricity (unitless)
+            "inclination": vessel.orbit.inclination,                # Orbital inclination [degrees]
             
             # Mass and Resources
-            "mass": self.vessel.mass(),  # Total mass [kg]
-            "dry_mass": self.vessel.dry_mass(),  # Dry mass [kg]
-            "fuel": self.vessel.resources.amount('LiquidFuel'),  # Liquid fuel remaining [units]
-            "max_fuel": self.vessel.resources.max('LiquidFuel'),  # Max liquid fuel capacity [units]
-            "oxidizer": self.vessel.resources.amount('Oxidizer'),  # Oxidizer remaining [units]
-            "max_oxidier": self.vessel.resources.max('Oxidizer'),  # Max oxidizer capacity [units]
-            "electric_charge": self.vessel.resources.amount('ElectricCharge'),  # Electric charge [units]
+            "mass": vessel.mass,            # Total mass [kg]
+            "dry_mass": vessel.dry_mass,    # Dry mass [kg]
+            "fuel": vessel.resources.amount('LiquidFuel'),      # Liquid fuel remaining [units]
+            "max_fuel": vessel.resources.max('LiquidFuel'),     # Max liquid fuel capacity [units]
+            "oxidizer": vessel.resources.amount('Oxidizer'),    # Oxidizer remaining [units]
+            "max_oxidizer": vessel.resources.max('Oxidizer'),   # Max oxidizer capacity [units]
+            "electric_charge": vessel.resources.amount('ElectricCharge'),  # Electric charge [units]
             
             # Control State
-            "throttle": self.vessel.control.throttle,  # Current throttle setting [0.0 - 1.0]
+            "throttle": vessel.control.throttle,  # Current throttle setting [0.0 - 1.0]
         }
 
         # Conditional RCS State
@@ -150,46 +149,51 @@ class KSPEnvironment():
             controls (Dict[str, float]): Contains the control values to update (Throttle, Pitch, Yaw etc.)
         """
         
+        def clamp(value, min_val=0.0, max_val=1.0):
+            return max(min_val, min(value, max_val))
+    
         # Updates the vehicle controls
-        self.vessel.control.throttle = controls.get("throttle", self.vessel.control.throttle)
-        self.vessel.control.pitch = controls.get("pitch", self.vessel.control.pitch)
-        self.vessel.control.yaw = controls.get("yaw", self.vessel.control.yaw)
-        self.vessel.control.roll = controls.get("roll", self.vessel.control.roll)
+        self.vessel.control.throttle = clamp(controls.get("throttle", self.vessel.control.throttle))
+        self.vessel.control.pitch = clamp(controls.get("pitch", self.vessel.control.pitch))
+        self.vessel.control.yaw = clamp(controls.get("yaw", self.vessel.control.yaw))
+        self.vessel.control.roll = clamp(controls.get("roll", self.vessel.control.roll))
         
         # Adding conditional RCS controls
         if self.rcs_enabled:
             
-            self.vessel.control.up = controls.get("rcs_up", self.vessel.control.up)
-            self.vessel.control.down = controls.get("rcs_down", self.vessel.control.down)
-            self.vessel.control.left = controls.get("rcs_left", self.vessel.control.left)
-            self.vessel.control.right = controls.get("rcs_right", self.vessel.control.right)
-            self.vessel.control.forward = controls.get("rcs_forward", self.vessel.control.forward)
-            self.vessel.control.backward = controls.get("rcs_backward", self.vessel.control.backward)
+            self.vessel.control.up = clamp(controls.get("rcs_up", self.vessel.control.up))
+            self.vessel.control.down = clamp(controls.get("rcs_down", self.vessel.control.down))
+            self.vessel.control.left = clamp(controls.get("rcs_left", self.vessel.control.left))
+            self.vessel.control.right = clamp(controls.get("rcs_right", self.vessel.control.right))
+            self.vessel.control.forward = clamp(controls.get("rcs_forward", self.vessel.control.forward))
+            self.vessel.control.backward = clamp(controls.get("rcs_backward", self.vessel.control.backward))
             
-    def step_simulation(self, controls: Dict[str, float], step_duration: int):
+    def step(self, controls: Dict[str, float]):
         """
         Advances the simulation by a specified duration.
         
         Parameters:
         conn (krpc.Connection): The active kRPC connection.
-        step_duration (float): Duration to advance the simulation, in seconds.
         """
         
         # Unpausing the game (custom state)
         self.connection.krpc.paused = False
 
         # Recording the target unpausing time
-        target_ut = self.connection.space_center.ut + step_duration
+        target_ut = self.connection.space_center.ut + self.step_sim_time
 
         # Updating the vehicle controls
         self.update_vehicle_controls(controls)
         
         # Wait until the target UT is reached
         while self.connection.space_center.ut < target_ut:
-            time.sleep(0.01)
+            time.sleep(0.001)
 
         # Pause the game (default state)
         self.connection.krpc.paused = True
+        
+        # Updating the elapsed time!
+        self.elapsed_time += self.step_sim_time
         
     def restart_episode(self):
         """
@@ -199,11 +203,11 @@ class KSPEnvironment():
         conn (krpc.Connection): The active kRPC connection.
         """
         
-        # Reverting the simulation to the initial state
-        self.connection.space_center.quickload()
-
-        # Unpausing the game (default state)
-        self.connection.krpc.paused = True
+        # Reverting to launch!
+        self.connection.revert_to_launch()
+        
+        # Pausing the game
+        self.connection.paused = True
         
     def get_distances(self, target_name: str) -> Dict[str, float]:
         """Returns the distances between the vessel and the target
@@ -234,10 +238,10 @@ class KSPEnvironment():
         """
 
         # Since there is no direct crash mechanism, checking if the Kerbins are alive and well!
-        for kerbin in self.vessel.crew:
-            
-            if kerbin.roster_status in ['dead', 'missing']:
-                return MissionStatus.CRASHED
+        current_part_count = len(self.vessel.parts.all)
+        
+        if current_part_count <= 1:
+            return MissionStatus.CRASHED
         
         # Checking if the vessel has run out of fuel
         if self.vessel.resources.amount("LiquidFuel") == 0 or self.vessel.resources.amount("Oxidizer") == 0:
