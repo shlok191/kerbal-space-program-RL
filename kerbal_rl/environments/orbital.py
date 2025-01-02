@@ -2,8 +2,6 @@ from kerbal_rl.environments.base import KSPEnvironment, MissionStatus
 from typing import Dict
 import numpy as np
 
-KERBIN_RADIUS = 598725.62
-
 class KerbinOrbitalEnvironment(KSPEnvironment):
     
     def __init__(self, 
@@ -69,7 +67,7 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
         raw_updates = self.get_vessel_updates()
         
         # Fetching normalized states
-        raw_updates.update({
+        normalized_updates = {
             
             # Updating reference related values
             "altitude": raw_updates['altitude'] / (self.max_altitude + eps),
@@ -90,9 +88,9 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
 
             # Updating the magic variable
             "thrust": raw_updates["thrust"] / (raw_updates["avail_thrust"] + eps),
-        })
+        }
         
-        return raw_updates
+        return normalized_updates
     
     def check_orbit(self) -> bool:
         """Checks if the vessel has achieved orbit around Kerbin!
@@ -104,33 +102,40 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
             bool: Returns True if the vessel has achieved orbit, False otherwise
         """
         
+        vessel = self.vessel_stream()
+        
         # Defining the target object
         target = self.connection.space_center.bodies["Kerbin"]
         
-        if (self.vessel.orbit.body == target and 
-            self.vessel.orbit.periapsis_altitude >= target.atmosphere_depth and 
-            self.vessel.orbit.eccentricity <= 1):
+        if (vessel.orbit.body == target and 
+            vessel.orbit.periapsis_altitude >= target.atmosphere_depth and 
+            vessel.orbit.eccentricity <= 1):
             
             return True
 
         return False
     
-    def check_terminal_state(self):
+    def check_terminal_state(self, altitude: float) -> MissionStatus:
         """Returns the state of the episode
 
         Returns:
             Enum: MissionStatus Categories
         """
         
+        vessel = self.vessel_stream()
+        
+        if vessel.situation == vessel.situation.landed:
+            return MissionStatus.CRASHED
+        
         # Checks if the mission is complete!
         if self.check_orbit():
             return MissionStatus.COMPLETED
         
-        if self.vessel.flight().mean_altitude > self.max_altitude:
+        if vessel.flight().mean_altitude > self.max_altitude:
             return MissionStatus.OUT_OF_BOUNDS
         
         # Returns the default terminal state
-        return super().check_terminal_state()
+        return super().check_terminal_state(altitude=altitude)
     
     def step(self, controls: Dict[str, float]) -> float:
         """Performs a step in the environment and returns a reward
@@ -153,21 +158,21 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
             float: The reward for the current state
         """
 
+        # Fetching relevant state values
+        current_state = self.get_normalized_vessel_state()
+        
         # Performing the first initial step
         super().step(controls)
         
         # Defining our initial reward
         reward = 0
         
-        # Fetching relevant state values
-        current_state = self.get_normalized_vessel_state()
-        
         altitude = current_state['altitude']
         velocity = current_state['velocity']
         pitch = current_state['pitch']
         periapsis_altitude = current_state['periapsis']
         apoapsis_altitude = current_state['apoapsis']
-                
+        
         # Phase 1: Initial Launch Phase -- 0 KM to 10 KM
         if altitude < 0.1:
             
@@ -209,10 +214,14 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
             reward += 15 * apoapsis_proximity
             reward += 15 * periapsis_proximity
         
-            
         # Defining a fuel efficiency penalty
-        current_fuel = self.vessel.resources.amount('LiquidFuel')
+        vessel = self.vessel_stream()
+        
+        current_fuel = vessel.resources.amount('LiquidFuel') / (vessel.resources.max('LiquidFuel') + 1e-5)
         fuel_used = self.previous_fuel - current_fuel
+        
+        fuel_used = np.clip(fuel_used, 0, 1)
+        
         reward -= 3 * fuel_used
         
         self.previous_fuel = current_fuel
@@ -221,30 +230,23 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
         reward -= 0.2 * self.elapsed_time
         
         # Fetching the episode state
-        episode_state = self.check_terminal_state()
-        
-        mission_status = None
+        episode_state = self.check_terminal_state(altitude)        
         
         # Penalizing negative scenarios that end the episode!
         if episode_state == MissionStatus.CRASHED:
             reward -= 500
-            mission_status = MissionStatus.CRASHED
             
         elif episode_state == MissionStatus.OUT_OF_BOUNDS:
             reward -= 500
-            mission_status = MissionStatus.OUT_OF_BOUNDS
             
         elif episode_state == MissionStatus.OUT_OF_FUEL:
             reward -= 200
-            mission_status = MissionStatus.OUT_OF_FUEL
             
         elif episode_state == MissionStatus.OUT_OF_TIME:
             reward -= 200
-            mission_status = MissionStatus.OUT_OF_TIME
              
         # Best case scenario, really hoping we get here!
         elif episode_state == MissionStatus.COMPLETED:
             reward += 1000
-            mission_status = MissionStatus.COMPLETED
-           
-        return reward, mission_status
+        
+        return reward, episode_state

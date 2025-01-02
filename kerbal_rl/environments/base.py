@@ -110,10 +110,6 @@ class KSPEnvironment():
             # Orbital Parameters
             "apoapsis": vessel.orbit.apoapsis_altitude,             # Highest point in orbit [meters]
             "periapsis": vessel.orbit.periapsis_altitude,           # Lowest point in orbit [meters]
-            "time_to_apoapsis": vessel.orbit.time_to_apoapsis,      # Time until apoapsis [seconds]
-            "time_to_periapsis": vessel.orbit.time_to_periapsis,    # Time until periapsis [seconds]
-            "eccentricity":vessel.orbit.eccentricity,               # Orbital eccentricity (unitless)
-            "inclination": vessel.orbit.inclination,                # Orbital inclination [degrees]
             
             # Mass and Resources
             "mass": vessel.mass,            # Total mass [kg]
@@ -150,8 +146,8 @@ class KSPEnvironment():
         """
         
         def clamp(value, min_val=0.0, max_val=1.0):
-            return max(min_val, min(value, max_val))
-    
+            return max(min_val, min(value.item(), max_val))
+        
         # Updates the vehicle controls
         self.vessel.control.throttle = clamp(controls.get("throttle", self.vessel.control.throttle))
         self.vessel.control.pitch = clamp(controls.get("pitch", self.vessel.control.pitch))
@@ -187,7 +183,7 @@ class KSPEnvironment():
         
         # Wait until the target UT is reached
         while self.connection.space_center.ut < target_ut:
-            time.sleep(0.001)
+            time.sleep(0.0001)
 
         # Pause the game (default state)
         self.connection.krpc.paused = True
@@ -204,7 +200,7 @@ class KSPEnvironment():
         """
         
         # Reverting to launch!
-        self.connection.revert_to_launch()
+        self.connection.space_center.quickload()
         
         # Pausing the game
         self.connection.paused = True
@@ -230,29 +226,19 @@ class KSPEnvironment():
         
         return distances
     
-    def check_terminal_state(self) -> str:
+    def check_terminal_state(self, altitude: float) -> str:
         """Checks if the a terminal state has been reached
         
         Returns:
             str: Returns the terminal state
         """
-
-        # Since there is no direct crash mechanism, checking if the Kerbins are alive and well!
-        current_part_count = len(self.vessel.parts.all)
-        
-        if current_part_count <= 1:
-            return MissionStatus.CRASHED
         
         # Checking if the vessel has run out of fuel
         if self.vessel.resources.amount("LiquidFuel") == 0 or self.vessel.resources.amount("Oxidizer") == 0:
             return MissionStatus.OUT_OF_FUEL
         
-        # Checking if the vessel is out of bounds
-        if self.vessel.orbit.body.surface_altitude < 0:
-            return MissionStatus.OUT_OF_BOUNDS
-        
         # Checking if the vessel has run out of time
-        if self.connection.space_center.ut > self.start_time + self.max_timesteps:
+        if self.connection.space_center.ut > self.start_time + self.max_steps * self.step_sim_time:
             return MissionStatus.OUT_OF_TIME
         
         # The default state :)
