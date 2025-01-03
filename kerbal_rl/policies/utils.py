@@ -1,116 +1,131 @@
-import flax.linen as nn
 import jax.numpy as jnp
-import jax
+from typing import Dict, Any, Tuple
 
-class ActorNetwork(nn.Module):
+from kerbal_rl.policies.networks import (
+    ActorCriticTrainState,
+    initialize_networks,
+)
 
-    action_dim: int
-    
-    def setup(self):
-        """Defines the Policy network which outputs
-        the logits for each action in the action space.
-        """
-        
-        # One point to note --> 256 is the output dimension!
-        # The input dimension is inferred during the first forward pass by Flax.
-        
-        # I found this to be a very cool mechanism :)
-        self.dense1 = nn.Dense(256, kernel_init=nn.initializers.xavier_uniform())
-        self.dense2 = nn.Dense(256, kernel_init=nn.initializers.xavier_uniform())
-        
-        self.batch_norm_1 = nn.BatchNorm()
-        self.batch_norm_2 = nn.BatchNorm()
-        
-        # Gives the logits for each action in the action space
-        self.logits = nn.Dense(self.action_dim, kernel_init=nn.initializers.normal(0.01))
+from orbax.checkpoint import (
+    CheckpointManager,
+    CheckpointManagerOptions,
+    PyTreeCheckpointer,
+)
 
-    def __call__(self, x, training: bool = True) -> jnp.ndarray:
-        """Performs the forward pass given an input JAX ndarray X.
+#######################################################
+#
+#  1. Defining functions for JAX - Python conversions
+#     useful for training and debugging
+#
+#######################################################
 
-        Args:
-            x (jnp.ndarray): A JAX-Numpy ndarray denoting the input [batch_size, observation_dim]
-            training (bool): A bool value indicating whether the model is in training mode. Effects batch norm!
-        
-        Returns:
-            jnp.ndarray: The output tensor of shape [batch_size, action_dim]
-        """
-        
-        x = nn.relu(self.dense1(x))
-        x = self.batch_norm_1(x, use_running_average=not training)
-        
-        x = nn.relu(self.dense2(x))
-        x = self.batch_norm_2(x, use_running_average=not training)
-        
-        return self.logits(x)
 
-class CriticNetwork(nn.Module):
-    
-    def setup(self):
-        """Defines the value network which estimates
-        the estimated values of given states.
-        """
-        
-        self.dense1 = nn.Dense(64, kernel_init=nn.initializers.xavier_uniform())
-        self.dense2 = nn.Dense(64, kernel_init=nn.initializers.xavier_uniform())
-        
-        self.batch_norm_1 = nn.BatchNorm()
-        self.batch_norm_2 = nn.BatchNorm()
-        
-        # Our value function only outputs one value denoting the estimated V(s)!
-        self.value = nn.Dense(1, kernel_init=nn.initializers.normal(0.1))
-
-    def __call__(self, x, training: bool = True):
-        """Returns the expected value of the given state.
-
-        Args:
-            x (jnp.ndarray): A JAX-Numpy ndarray denoting the input [batch_size, observation_dim] 
-            training (bool): A bool value indicating whether the model is in training mode. Effects batch norm!
-            
-        Returns:
-            jnp.nadarray: Output JAX-Numpy ndarray of shape [batch_size, 1]
-        """
-        
-        x = nn.relu(self.dense1(x))
-        x = self.batch_norm_1(x, use_running_average=not training)
-        
-        x = nn.relu(self.dense2(x))
-        x = self.batch_norm_2(x, use_running_average=not training)
-        
-        return self.value(x)
-
-def GAE_function(rewards, values, dones, gamma_val, lambda_val):
-    """Calculates the Generalized Advantage Estimation (GAE)
-    for the given rewards, values, dones, gamma and lambda.
+def dict_to_array(state_dict: Dict[str, Any]) -> jnp.ndarray:
+    """Converts the state dictionary to a valid JAX array!
 
     Args:
-        rewards (jnp.ndarray): A Jax-Numpy array denoting the rewards received across the rocket trajectory
-        values (jnp.ndarray): A Jax-Numpy array denoting the values predicted by the Critic Network
-        dones (jnp.ndarray): A boolean array denoting whether an episode ends at this timestep
-        gamma_val (float32): A float value denoting the discount factor for future values
-        lambda_val (float32): A float value denoting the trustworthiness of future values 
+        state_dict (Dict): The state dictionary representing the environment state
 
     Returns:
-        jnp.ndarray: A Jax-Numpy array denoting the GAE values
+        JAX array: A JAX array that can be passed into the Actor-Critic networks!
     """
+
+    # Extracting the velocity components since it is a 3D vector
+    velocity = state_dict.pop("velocity")
+
+    # Convert remaining values to array and concatenate with velocity
+    return jnp.concatenate([jnp.array(list(state_dict.values())), jnp.array(velocity)])
+
+
+################################################
+#
+# 2. Defining Checkpointing related functions
+#
+################################################
+
+
+def restore_train_state(
+    directory: str,
+    action_dim: int,
+    observation_dim: int,
+    actor_dense_dim: int,
+    critic_dense_dim: int,
+    actor_lr: float,
+    critic_lr: float,
+    max_to_keep: int,
+) -> Tuple[ActorCriticTrainState, CheckpointManager, int]:
+    """Returns training state from a checkpoint or initializes new instances
+
+    Args:
+        directory (str): The absolute path of the checkpoint directory
+        action_dim (int): The action dimension of the Actor Network
+        observation_dim (int): The observation dimension of the environment
+        actor_dense_dim (int): The out dimensions of the Dense layers in the Actor Network
+        critic_dense_dim (int): The out dimensions of the Dense layers in the Critic Network
+        actor_lr (float): Learning Rate for the Actor Network
+        critic_lr (float): Learning Rate for the Critic Network
+
+    Returns:
+        Tuple[ActorNetwork, CriticNetwork, ActorCriticTrainState, CheckpointManager, int]:
+
+            - ActorNetwork: The created Cctor Network
+            - CriticNetwork: The created Critic Network
+            - ActorCriticTrainState: The loaded / created Training State
+            - CheckpointManager: The checkpoint manager used for training
+            - Int: The current global step count
+    """
+
+    # First we create our checkpoint manager!
+    checkpointer = PyTreeCheckpointer()
+    options = CheckpointManagerOptions(max_to_keep=max_to_keep, create=True)
     
-    deltas = (rewards + 1.0 - dones) * gamma_val * values[1:] - values[:-1]
-    
-     # Compute GAE recursively using JAX's scan
-    def gae_step(carry, x):
-    
-        advantage, discount = carry
-        delta, done = x
-    
-        # Update advantage using GAE formula
-        advantage = delta + (1.0 - done) * gamma_val * lambda_val * advantage
-        return (advantage, discount), advantage
-    
-    # Initialize with zeros and scan backwards
-    _, advantages = jax.lax.scan(
-        gae_step,
-        (0.0, 1.0),  # Initial advantage and discount
-        (deltas, dones),
-        reverse=True
+    checkpoint_manager = CheckpointManager(
+        directory=directory,
+        checkpointers={"train_state": checkpointer},
+        options=options,
     )
+
+    # Checking for existing checkpoints
+    latest_step = checkpoint_manager.latest_step()
     
-    return advantages
+    if latest_step is not None:
+    
+        print(f"Restoring training from the step {latest_step}...")
+        print(f"Best of luck for training! :)")
+        
+        restored_dict = checkpoint_manager.restore(latest_step)
+        
+        # Fetching the train state object
+        state_dict = restored_dict["train_state"]
+        train_state = ActorCriticTrainState(**state_dict)
+        
+        # Fetching the global steps
+        start_step = train_state.step
+        
+        # Using the init. network function to get the networks (a bit lazy, I know!)
+        actor_network, critic_network, _ = initialize_networks(
+            action_dim=action_dim,
+            observation_dim=observation_dim,
+            actor_dense_dim=actor_dense_dim,
+            critic_dense_dim=critic_dense_dim,
+            actor_lr=actor_lr,
+            critic_lr=critic_lr,
+        )
+        
+    else:
+        print("No checkpoint found; initializing a fresh TrainState.")
+        print(f"Best of luck for training! :)")
+        
+        # Initializing a new training state if none is provided
+        actor_network, critic_network, train_state = initialize_networks(
+            action_dim=action_dim,
+            observation_dim=observation_dim,
+            actor_dense_dim=actor_dense_dim,
+            critic_dense_dim=critic_dense_dim,
+            actor_lr=actor_lr,
+            critic_lr=critic_lr,
+        )
+        
+        start_step = 0
+    
+    return actor_network, critic_network, train_state, checkpoint_manager, start_step
