@@ -1,6 +1,6 @@
 # Creates a custom Python API to connect with and run a KSP environment
 import krpc
-from typing import List, Dict
+from typing import Dict
 import time
 from enum import Enum
     
@@ -73,6 +73,9 @@ class KSPEnvironment():
         
         # Defining the maximum number of steps!
         self.max_steps = max_steps    
+                    
+        # Introducing the speedup for faster training :)
+        self.connection.space_center.physics_warp_factor = 2
         
         ref_frame = self.vessel.orbit.body.reference_frame
         
@@ -86,10 +89,17 @@ class KSPEnvironment():
         Returns:
             Dict[str, float]: Contains atributes and their values (Altitude, Velocity, etc.)
         """
+    
+        try:
+            # Collecting flight info
+            flight = self.flight_stream()
+            vessel = self.vessel_stream()
         
-        # Collecting flight info
-        flight = self.flight_stream()
-        vessel = self.vessel_stream()
+        except:
+            
+            print("Encountered an error while fetching vessel updates!")
+            self.older_state['altitude'] = -100
+            return self.older_state
         
         # Defining the dictionary to return with critical vessel state parameters
         vessel_state = {
@@ -135,7 +145,9 @@ class KSPEnvironment():
                 "monopropellant": self.vessel.resources.amount('MonoPropellant'),  # Remaining monopropellant [units]
                 "monopropellant_capacity": self.vessel.resources.max('MonoPropellant'),  # Max monopropellant capacity [units]
             })
-            
+        
+        self.older_state = vessel_state
+        
         return vessel_state
 
     def update_vehicle_controls(self, controls: Dict[str, float]):
@@ -173,7 +185,7 @@ class KSPEnvironment():
         """
         
         # Unpausing the game (custom state)
-        self.connection.krpc.paused = False
+        # self.connection.krpc.paused = False
 
         # Recording the target unpausing time
         target_ut = self.connection.space_center.ut + self.step_sim_time
@@ -184,9 +196,6 @@ class KSPEnvironment():
         # Wait until the target UT is reached
         while self.connection.space_center.ut < target_ut:
             time.sleep(0.0001)
-
-        # Pause the game (default state)
-        self.connection.krpc.paused = True
         
         # Updating the elapsed time!
         self.elapsed_time += self.step_sim_time
@@ -202,9 +211,24 @@ class KSPEnvironment():
         # Reverting to launch!
         self.connection.space_center.quickload()
         
-        # Pausing the game
-        self.connection.paused = True
+        time.sleep(1.5)
         
+        self.vessel = self.connection.space_center.active_vessel
+        self.vessel.name = self.vessel_name
+        
+        # Getting the starting time in KSP time
+        self.start_time = self.connection.space_center.ut
+        self.elapsed_time = 0
+        
+        # Introducing the speedup for faster training :)
+        self.connection.space_center.physics_warp_factor = 1.5
+        
+        ref_frame = self.vessel.orbit.body.reference_frame
+        
+        # Defining the flight and vessel stream that collects info through a TCP/IP connection
+        self.flight_stream = self.connection.add_stream(self.vessel.flight, ref_frame)
+        self.vessel_stream = self.connection.add_stream(getattr, self.connection.space_center, 'active_vessel')
+
     def get_distances(self, target_name: str) -> Dict[str, float]:
         """Returns the distances between the vessel and the target
         

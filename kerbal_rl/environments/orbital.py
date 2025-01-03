@@ -180,7 +180,9 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
             ideal_pitch = 0.17
             
             # Rewarding vertical and penalizing horizontal velocity
-            reward -= 5 * (velocity[0])
+            reward -= (velocity[0])
+            reward -= (velocity[2])
+            
             reward += 10 * velocity[1]
             
             # Pitch alignment bonus for staying close to the ideal pitch
@@ -196,8 +198,9 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
             
             # Pitch alignment bonus
             pitch_alignment = 1 - abs(pitch - ideal_pitch)
-        
-        
+
+            reward += 2.5 * pitch_alignment
+            
         # Phase 3: Late Gravity Turn Phase -- 20 KM to 100 KM
         elif altitude >= 0.3:
             
@@ -205,48 +208,44 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
             ideal_pitch = 0.5 
         
             pitch_alignment = 1 - abs(pitch - ideal_pitch)
-            reward += 10 * pitch_alignment
+            reward += 2.5 * pitch_alignment
         
             # Starting to give out rewards for meeting apoapsis and periapsis targets
             apoapsis_proximity = 1 - abs(apoapsis_altitude)
             periapsis_proximity = 1 - abs(periapsis_altitude)
             
-            reward += 15 * apoapsis_proximity
-            reward += 15 * periapsis_proximity
+            reward += 5 * apoapsis_proximity
+            reward += 5 * periapsis_proximity
         
         # Defining a fuel efficiency penalty
-        vessel = self.vessel_stream()
+        # vessel = self.vessel_stream()
         
-        current_fuel = vessel.resources.amount('LiquidFuel') / (vessel.resources.max('LiquidFuel') + 1e-5)
-        fuel_used = self.previous_fuel - current_fuel
+        # current_fuel = vessel.resources.amount('LiquidFuel') / (vessel.resources.max('LiquidFuel') + 1e-5)
         
-        fuel_used = np.clip(fuel_used, 0, 1)
+        # fuel_used = self.previous_fuel - current_fuel
+        # fuel_used = np.clip(fuel_used, 0, 1)
         
-        reward -= 3 * fuel_used
-        
-        self.previous_fuel = current_fuel
-        
-        # Also devising a time penalty
-        reward -= 0.2 * self.elapsed_time
+        # reward -= 0.25 * fuel_used
+        # self.previous_fuel = current_fuel
         
         # Fetching the episode state
         episode_state = self.check_terminal_state(altitude)        
         
         # Penalizing negative scenarios that end the episode!
         if episode_state == MissionStatus.CRASHED:
-            reward -= 500
+            reward -= 100
             
         elif episode_state == MissionStatus.OUT_OF_BOUNDS:
-            reward -= 500
+            reward -= 100
             
         elif episode_state == MissionStatus.OUT_OF_FUEL:
-            reward -= 200
+            reward -= 80
             
         elif episode_state == MissionStatus.OUT_OF_TIME:
-            reward -= 200
+            reward -= 80
              
         # Best case scenario, really hoping we get here!
         elif episode_state == MissionStatus.COMPLETED:
-            reward += 1000
+            reward += 200
         
         return reward, episode_state
