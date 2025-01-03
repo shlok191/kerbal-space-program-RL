@@ -133,21 +133,25 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
             Enum: MissionStatus Categories
         """
 
-        vessel = self.vessel_stream()
+        try:
+            vessel = self.vessel_stream()
 
-        if vessel.situation == vessel.situation.landed:
+            if vessel.situation == vessel.situation.landed:
+                return MissionStatus.CRASHED
+
+            # Checks if the mission is complete!
+            if self.check_orbit():
+                return MissionStatus.COMPLETED
+
+            if vessel.flight().mean_altitude > self.max_altitude:
+                return MissionStatus.OUT_OF_BOUNDS
+
+            # Returns the default terminal state
+            return super().check_terminal_state()
+
+        except:
             return MissionStatus.CRASHED
-
-        # Checks if the mission is complete!
-        if self.check_orbit():
-            return MissionStatus.COMPLETED
-
-        if vessel.flight().mean_altitude > self.max_altitude:
-            return MissionStatus.OUT_OF_BOUNDS
-
-        # Returns the default terminal state
-        return super().check_terminal_state(altitude=altitude)
-
+        
     def step(self, controls: Dict[str, float]) -> float:
         """Performs a step in the environment and returns a reward
 
@@ -188,7 +192,7 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
         if altitude < 0.1:
 
             # This matches Kerbin's natural tilt when normalized :)
-            ideal_pitch = 0.17
+            ideal_pitch = 0.0
 
             # Rewarding vertical and penalizing horizontal velocity
             reward -= velocity[0]
@@ -249,10 +253,10 @@ class KerbinOrbitalEnvironment(KSPEnvironment):
             reward -= 100
 
         elif episode_state == MissionStatus.OUT_OF_FUEL:
-            reward -= 80
+            reward -= 100
 
         elif episode_state == MissionStatus.OUT_OF_TIME:
-            reward -= 80
+            reward -= 100
 
         # Best case scenario, really hoping we get here!
         elif episode_state == MissionStatus.COMPLETED:

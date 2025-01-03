@@ -167,13 +167,15 @@ class ActorCriticTrainState(train_state.TrainState):
     ) -> "ActorCriticTrainState":
 
         # Updating the Actor parameters
-        actor_updates, actor_opt_state = self.tx.update(actor_grads, self.opt_state)
+        
+        actor_updates, actor_opt_state = self.tx.update(actor_grads, self.opt_state, self.params)
         actor_params = optax.apply_updates(self.params, actor_updates)
 
         # Updating the Critic parameters
         critic_updates, critic_opt_state = self.critic_tx.update(
-            critic_grads, self.critic_opt_state
+            critic_grads, self.critic_opt_state, self.critic_params
         )
+        
         critic_params = optax.apply_updates(self.critic_params, critic_updates)
 
         return self.replace(
@@ -194,6 +196,7 @@ def initialize_networks(
     critic_dense_dim: int,
     actor_lr: float,
     critic_lr: float,
+    max_grad_norm: float = 0.5,
 ) -> Tuple[ActorNetwork, CriticNetwork, ActorCriticTrainState]:
     """Initializes the Actor-Critic Networks and the custom Training State object!
 
@@ -205,6 +208,7 @@ def initialize_networks(
         critic_dense_dim (int): The out dimensions of the Dense layers in the Critic Network
         actor_lr (float): The learning rate for the Actor Network
         critic_lr (float): The learning rate for the Critic Network
+        max_grad_norm (float): The maximum gradient norm for the networks
 
     Returns:
 
@@ -223,7 +227,7 @@ def initialize_networks(
     master_rng_key = jax.random.PRNGKey(0)
     actor_key, critic_key = jax.random.split(master_rng_key)
 
-    dummy_observation = jnp.ones(1, observation_dim)
+    dummy_observation = jnp.ones((1, observation_dim))
 
     # Fetching the Actor-Critic metadata
     actor_metadata = actor_network.init(actor_key, dummy_observation)
@@ -236,8 +240,13 @@ def initialize_networks(
     critic_batch_stats = critic_metadata.get("batch_stats", None)
 
     # Creating & initializing the optimizers for both networks!
-    actor_tx = optax.adam(learning_rate=actor_lr)
-    critic_tx = optax.adam(learning_rate=critic_lr)
+    actor_tx = optax.chain(
+        optax.clip_by_global_norm(max_grad_norm), optax.adamw(learning_rate=actor_lr)
+    )
+
+    critic_tx = optax.chain(
+        optax.clip_by_global_norm(max_grad_norm), optax.adamw(learning_rate=critic_lr)
+    )
 
     actor_opt_state = actor_tx.init(actor_params)
     critic_opt_state = critic_tx.init(critic_params)
@@ -289,8 +298,8 @@ def GAE_function(rewards, values, dones, gamma=0.99, lam=0.95):
     td = rewards + gamma * values[:, 1:] * (1 - dones) - values[:, :-1]
 
     # GAE is calculated from the last timestep to the first, so reversing!
-    td_reversed = jnp.flip(td, axis=1)
-    dones_reversed = jnp.flip(dones, axis=1)
+    td_reversed = jnp.flip(td, axis=1).T
+    dones_reversed = jnp.flip(dones, axis=1).T
 
     def scan_fn(carry, X):
         """Helper function to calculate GAE with JAX-supported vectorized formats
@@ -304,15 +313,17 @@ def GAE_function(rewards, values, dones, gamma=0.99, lam=0.95):
         """
 
         td_t, done_t = X
+
         gae_t = td_t + gamma * lam * (1 - done_t) * carry
 
         return gae_t, gae_t
 
     # Defining the carry values across all batches (will be 0 for the beginning)
-    carries = jnp.zeros_like(td[:, 0])
+    carries = jnp.zeros(rewards.shape[0])
 
     # Applying the scan function, and flipping again to gain original temporal order!
-    gae_reversed, _ = jax.lax.scan(scan_fn, carries, (td_reversed, dones_reversed))
-    advantages = jnp.flip(gae_reversed, axis=1)
+    _, gae_reversed = jax.lax.scan(scan_fn, carries, (td_reversed, dones_reversed))
+
+    advantages = jnp.flip(gae_reversed.T, axis=0)
 
     return advantages

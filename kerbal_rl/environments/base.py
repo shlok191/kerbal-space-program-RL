@@ -285,26 +285,31 @@ class KSPEnvironment:
 
         return distances
 
-    def check_terminal_state(self, altitude: float) -> str:
+    def check_terminal_state(self) -> str:
         """Checks if the a terminal state has been reached
 
         Returns:
             str: Returns the terminal state
         """
+        
+        try:
+            # Checking if the vessel has run out of fuel
+            if (
+                self.vessel.resources.amount("LiquidFuel") == 0
+                or self.vessel.resources.amount("Oxidizer") == 0
+            ):
+                return MissionStatus.OUT_OF_FUEL
 
-        # Checking if the vessel has run out of fuel
-        if (
-            self.vessel.resources.amount("LiquidFuel") == 0
-            or self.vessel.resources.amount("Oxidizer") == 0
-        ):
-            return MissionStatus.OUT_OF_FUEL
+            # Checking if the vessel has run out of time
+            if (
+                self.connection.space_center.ut
+                > self.start_time + self.max_steps * self.step_sim_time
+            ):
+                return MissionStatus.OUT_OF_TIME
 
-        # Checking if the vessel has run out of time
-        if (
-            self.connection.space_center.ut
-            > self.start_time + self.max_steps * self.step_sim_time
-        ):
-            return MissionStatus.OUT_OF_TIME
-
-        # The default state :)
-        return MissionStatus.IN_PROGRESS
+            # The default state :)
+            return MissionStatus.IN_PROGRESS
+        
+        except:
+            return MissionStatus.CRASHED
+                

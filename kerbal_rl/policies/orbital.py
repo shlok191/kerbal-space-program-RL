@@ -9,27 +9,22 @@ from kerbal_rl.policies.networks import (
     GAE_function,
 )
 
+from flax.serialization import to_state_dict
 from kerbal_rl.policies.utils import dict_to_array, restore_train_state
 
 import jax
 import flax
-import optax
 import distrax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-import orbax.checkpoint as ocp
-from orbax.checkpoint import (
-    CheckpointManager,
-    CheckpointManagerOptions,
-    PyTreeCheckpointer,
-)
+from orbax.checkpoint import CheckpointManager
 
 import wandb
 
 # Defining important hyperparameters
 TOTAL_STEPS = 500_000
-STEPS_PER_BATCH = 128
+STEPS_PER_BATCH = 32
 MINI_BATCH_SIZE = 32
 TOTAL_EPOCHS = 16
 
@@ -46,6 +41,7 @@ VALUE_LOSS_COEF = 0.5
 ENTROPY_COEF = 0.01
 
 CHECKPOINT_ITER = 512
+CLIP_BY_NORM = 0.5
 
 
 def update_networks(
@@ -311,11 +307,14 @@ def update_networks(
         old_actor_params = training_state.params
         old_critic_params = training_state.critic_params
 
-        def loss_fn(training_state: ActorCriticTrainState):
+        def loss_fn(actor_params, actor_batch_stats, critic_params, critic_batch_stats):
             """The loss function for the PPO updates
 
             Args:
-                training_state (ActorCriticTrainState): The training state containing the metadata
+               actor_params: The parameters of the Actor Network
+               actor_batch_stats: The batch statistics of the Actor Network
+               critic_params: The parameters of the Critic Network
+               critic_batch_stats: The batch statistics of the Critic Network
 
             Returns:
                 Tuple [float, Tuple[float, float, jnp.array, jnp.array, float, float]]:
@@ -341,8 +340,8 @@ def update_networks(
             ) = ppo_loss(
                 actor_network=actor_network,
                 critic_network=critic_network,
-                actor_params=training_state.params,
-                critic_params=training_state.critic_params,
+                actor_params=actor_params,
+                critic_params=critic_params,
                 actor_batch_stats=actor_batch_stats,
                 critic_batch_stats=critic_batch_stats,
                 observations=observations,
@@ -374,7 +373,10 @@ def update_networks(
                 entropy,
             ),
         ), grads = jax.value_and_grad(loss_fn, argnums=(0, 2), has_aux=True)(
-            train_state
+            training_state.params,
+            training_state.actor_batch_stats,
+            training_state.critic_params,
+            training_state.critic_batch_stats,
         )
 
         actor_grads, critic_grads = grads
@@ -413,10 +415,10 @@ def update_networks(
             )
 
             print(f"[DEBUG] Actor Grad Norm: {actor_grad_norm:.6f}")
-            print(f"Critic Grad Norm: {critic_grad_norm:.6f}")
+            print(f"[DEBUG] Critic Grad Norm: {critic_grad_norm:.6f}")
 
             print(f"[DEBUG] Actor Param L2 Δ: {actor_param_diff:.6f}")
-            print(f"Critic Param L2 Δ: {critic_param_diff:.6f}")
+            print(f"[DEBUG] Critic Param L2 Δ: {critic_param_diff:.6f}")
 
         return training_state, log_dict
 
@@ -515,7 +517,7 @@ def update_networks(
             mean_metrics[key] = jnp.mean(jnp.array(values))
 
         # Adding the step count!
-        mean_metrics["steps"] = training_state.steps
+        mean_metrics["steps"] = training_state.step
 
         # Logging the averaged metrics
         wandb.log(mean_metrics)
@@ -549,7 +551,7 @@ def collect_experience(
         print(f"We will be collecting {steps} steps")
 
         print("\n--- Episode Statistics ---")
-        print("Episode Length | Total Reward | Terminal State")
+        print("Current Step | Total Reward | Terminal State")
         print("-" * 50 + "\n")
 
     # Keeps track of the observations, actions, rewards and dones!
@@ -593,9 +595,10 @@ def collect_experience(
         episode_reward += reward
 
         # Restarting the episode if we reach a terminal state!
-        if done is not MissionStatus.IN_PROGRESS and debug_print:
+        if done is not MissionStatus.IN_PROGRESS:
 
-            print(f"{step} | {episode_reward} | {done}")
+            if debug_print:
+                print(f"{step} | {episode_reward:.4f} | {done}")
 
             episode_reward = 0
             env.restart_episode()
@@ -603,7 +606,9 @@ def collect_experience(
     # This means we ended at a non-terminal state
     if dones[-1] is False:
 
-        print(f"{steps} | {episode_reward} | {done}")
+        if debug_print:
+            print(f"{steps} | {episode_reward:.4f} | {done}")
+
         env.restart_episode()
 
     # Adding the final state to the observations
@@ -666,10 +671,10 @@ def train_ppo(
     master_key = jax.random.PRNGKey(0)
 
     # In each iteration, we traverse a set amount of steps which will give us values to improve the network!
-    
+
     start_iter = start_step // steps_per_batch
-    end_iter =  total_steps // steps_per_batch
-    
+    end_iter = total_steps // steps_per_batch
+
     for iteration in range(start_iter, end_iter):
 
         # Splitting the keys into new sets
@@ -683,6 +688,7 @@ def train_ppo(
             actor_batch_stats=training_state.actor_batch_stats,
             steps=steps_per_batch,
             key=collect_key,
+            debug_print=True,
         )
 
         # Fetching future value predictions from the Critic Network
@@ -712,24 +718,33 @@ def train_ppo(
             dones,
             num_epochs,
             mini_batch_size,
+            debug_print=True,
         )
 
         # Saving the checkpoint every X iterations
         if iteration % CHECKPOINT_ITER == 0:
-
+            
+            # Converting the state dictionaries to help with Flax serialization
+            opt_state_dict = to_state_dict(training_state.opt_state)
+            critic_opt_state_dict = to_state_dict(training_state.critic_opt_state)
+            
             state_dict = {
-                "actor_params": training_state.params,
+                "params": training_state.params,
                 "critic_params": training_state.critic_params,
                 "actor_batch_stats": training_state.actor_batch_stats,
                 "critic_batch_stats": training_state.critic_batch_stats,
-                "actor_opt_state": training_state.opt_state,
-                "critic_opt_state": training_state.critic_opt_state,
-                "steps": training_state.steps,
+                "opt_state": opt_state_dict,
+                "critic_opt_state": critic_opt_state_dict,
+                "step": training_state.step,
             }
 
             checkpoint_manager.save(iteration, {"train_state": state_dict})
 
             print(f"Saved checkpoint at step {iteration}!")
+
+        # Begin evaluation of the model!
+        if iteration * steps_per_batch >= EVAL_INTERVAL:
+            pass
 
 
 if __name__ == "__main__":
@@ -771,7 +786,7 @@ if __name__ == "__main__":
 
     # Fetching variables to fetch model hyperparameters
     action_dim = len(environment.action_space)
-    observation_dim = len(environment.get_normalized_vessel_state())
+    observation_dim = dict_to_array(environment.get_normalized_vessel_state()).shape[0]
 
     # Fetching the models from an existing checkpoint or making a new one!
     actor_network, critic_network, train_state, checkpoint_manager, step = (
@@ -784,8 +799,17 @@ if __name__ == "__main__":
             actor_lr=ACTOR_LR,
             critic_lr=CRITIC_LR,
             max_to_keep=5,
+            max_grad_norm=CLIP_BY_NORM,
         )
     )
+
+    print("\n")
+
+    print(f"{'=' * 50}")
+    print("Beginning training....")
+    print(f"{'=' * 50}")
+
+    print("\n")
 
     # Training the PPO model now!
     train_ppo(
